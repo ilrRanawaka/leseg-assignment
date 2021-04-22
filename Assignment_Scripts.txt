@@ -1,0 +1,412 @@
+
+                                            FIRST PART
+--------------------------------------------------------------------------------------------------------------------------------
+--------------------------------------------------------------------------------------------------------------------------------
+
+
+
+--EC2 instance & Webserver
+
+An EC2 instance was spinned up with Ubuntu server and Publicly available.
+--Web server
+Apache  server was installed in the above EC2 instance following the commands mentioned below.
+
+----sudo apt-get update          #will update and upgrade the OS
+----sudo apt-get upgrade
+----sudo apt-get install apache2 #will install apache and we can check it with our browser
+----sudo nano test.html          #will create the static web page for us
+--------<html>
+        
+        <h1><center> Hello World </center></h1>
+
+        </html>        
+
+**As I used Python as the scripting language it had to install Python in the server along with paramiko (is Python implementation of
+SSHv2 protocol). Also, AWS CLI had to be installed in the EC2 instance for further requirements.
+
+Therefore, refer the following commands for above mentioned things.
+
+----sudo install Python3.8                            #Installs Python
+----sudo apt-get install python3-pip                  #Installs Python package manager for Python3
+
+ 
+----mkdir -p build/python/lib/python3.8/site-packages #creating a clear directory structure so that can be used with 
+                                                      #Lambda functions in the future without any issue
+
+
+----pip3 install paramiko -t build/python/lib/python3.8/site-packages/ --system  #Installs paramiko 
+
+----cd build/                                         # changing the directory to build
+----sudo apt install zip                              #Installs zip
+----zip -r packageParamiko.zip .                      #creates a zip file in build with PackageParamiko name
+
+----curl "https:/awscli.amazonaws.com/awscli-exe-linux-x86_64.zip -o "awscliv2.zip" #installs aws cli for us and saves in awscliv2.zipfile
+
+----unzip awscliv2.zip #Unzip  awscliv2.zip file
+
+----sudo ./aws/install #install the cli
+
+*For the following command to function there must be permissions for EC2 instance to access S3. Therefore, an IAM role 
+with the policy Amazon s3 full access has to be created and attach it to the instance
+
+
+----aws s3 cp packageParamiko.zip s3://isuribucket #isuribucket, the bucket name I have in S3 
+
+
+Okay...now the work with the ubuntu commands is almost done and will have to do the following,
+
+-> Upload the key value pair pem file to S3 bucket
+-> Create a Lambda layer for the Paramiko package
+-> Create an IAM role for the Lambda function (policies -> Lambda basic execution, Amazon EC2 full access , Amazon S3 full access)
+-> Create a Lambda Function and add the above layer
+
+Here, our task is to SSH the server with the script and check if the webserver is up and running (Python)
+and we configure this Lambda function i.e. it gets triggerd by a CloudWatch scheduled event in order to have the Lambda 
+function run periodically.
+
+
+The Code for the lambda function (script) is below
+
+----------------------------------------------------------------------------------------------------------------------------------------
+
+import json
+import boto3 #To fetch the public IP address from EC2 instance and to download the pem file from S3 bucket 
+import paramiko
+import subprocess
+
+def lambda_handler(event, context):
+    # defining boto3 object for ec2 and s3 services respectively
+    client = boto3.client('ec2')
+    s3_client = boto3.client('s3')
+    
+    # getting ec2 instance information
+    describeInstance = client.describe_instances()
+
+    
+    hostPublicIP=[]
+    # fetching public IP address of the running instances(in case there will be more than
+    # one instance running, and here there's only one instance is running.
+
+    for i in describeInstance['Reservations']:
+        for instance in i['Instances']:
+            if instance["State"]["Name"] == "running":
+                hostPublicIP.append(instance['PublicIpAddress'])
+            else:
+                #Here it should come the email part, therefore create a SNS topic and subscribe for it
+                subprocess.run("aws sns publish --topic-arn arn:aws:sns:ap-south-1:888010083685:WebServerNotUP
+                --message ""Ip Address not mounted cannot execute further""
+                ",shell=True,check=True)
+    
+    print(hostPublicIP)
+    
+    # downloading pem file from S3
+    s3_client.download_file('isuribucket','task.pem', '/tmp/file.pem')
+
+    # reading pem file and creating key object , here a ppk file is created
+    # i.e. ssh can be done
+    key = paramiko.RSAKey.from_private_key_file("/tmp/file.pem")
+
+    # an instance of the Paramiko.SSHClient
+    ssh_client = paramiko.SSHClient()
+
+    # setting policy to connect to unknown host ( when connecting or ssh for the first time)
+    ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+
+    host=hostPublicIP[0]
+    print("Connecting to : " + host)
+    # connecting to server
+    ssh_client.connect(hostname=host, username="ubuntu", pkey=key)
+    print("Connected to :" + host)
+
+  
+
+
+    # checking whether the webserver is up and otherwise starting it
+    status = subprocess.check_output("sudo systemctl status apache2", shell=True)
+		if ("is stopped" in status):
+			print service + "  - Stopped"
+			print service + "  - Trying to start"
+			service_start = subprocess.check_output("sudo systemctl start apache2", shell=True)
+		else:
+			print service + "  - Running "
+
+
+    
+    subprocess.run(" aws logs create-export-task --profile CWLExportUser --task-name "my-log-group-09-10-2015" --log-group-name    "/aws/lambda/lambda_ssh_ec2" --from 1441490400000 --to 1441494000000 --destination "isuribucket" --destination-prefix "export-task-    output",shell=True,check=True) #doing the export
+
+     return
+
+   #As Lambda function gives the CloudWatch Logs automatically, we have written i.e. those regularly made log files
+   are sent to  S3 bucket by using the AWS  CLI
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                        SECOND PART
+-------------------------------------------------------------------------------------------------------------------------------------------
+-------------------------------------------------------------------------------------------------------------------------------------------
+
+Already EC2 instance is there with Ubuntu, Python,apache2 installed
+Next task is to install cron in Ubuntu 
+
+
+
+ 
+sudo apt-get install cron #Insalls cron
+
+sudo systemctl enable cron #it’s set to run in the background
+
+Then we will transfer the  cronfile and the python script file( created in my windows) to the ec2 instance
+via FileZilla.
+
+
+following is the cronjob I wrote in the cronfile (to run the test.py script daily)
+
+0 0 * * * python test.py
+
+then the cron file is added to the crontab with the following command
+
+crontab test.cron 
+
+Now our test.py will run everyday at midnight
+
+
+-----------------------------------------------------------
+
+(The script) is as follows
+
+import subprocess #lib used to execute shell commands in python
+
+  def check(s3_service, bucket, key):
+      try:
+        s3_service.Object(bucket, key).load()
+     except ClientError as e:
+        return int(e.response['Error']['Code']) != 404
+     return True
+
+
+#In the previous section we have downloaded the aws cli and installed, therefore run the following commands via cli
+  subprocess.run("aws logs create-export-task --profile CWLExportUser --task-name "my-log-group-09-10-2015" --log-group-name "my-log-  group_access" --from 1441490400000 --to 1441494000000 --destination "isuribucket" --destination-prefix "export-task-output",  shell=True,check=True)
+
+
+------------------------------------------------------------------
+#check if the S3 upload is successfull
+------------------------------------------------------------------
+
+
+
+
+   s3_service = boto3.resource(service_name='s3')
+   if s3_service==False:
+
+      ---------------------------------------------------------------------------
+      #Publish to the SNS topic
+      ---------------------------------------------------------------------------
+
+
+#Here I have already created a SNS topic from the console, therefore will use that topic's arn here
+
+
+      subprocess.run("aws sns publish --topic-arn arn:aws:sns:ap-south-1:888010083685:UploadFailure --message "Upload is unsuccessful"
+      ",shell=True,check=True)
+         
+
+
+
+
+
+
+
+
+
+   
+
+------------------------------------------------------------------------------------------------------------------
+ Before doing the export to S3 from Cloudwatch logs followin has to be done  in EC2 instance, creating IAM users and all
+ So,do it very early before writing scripts
+--------------------------------------------------------------------------------------------------------------------
+
+
+
+#As in the first section aws cli is installed, here not needed
+
+
+
+    subprocess.run("aws iam create-user --user-name CWLExportUser ",shell=True,check=True) #create an IAM user
+    subprocess.run("export S3POLICYARN=$(aws iam list-policies --query 'Policies[?PolicyName==`AmazonS3FullAccess`].{ARN:Arn}' --output text) ",shell=True,check=True) #choosing policy
+
+
+    subprocess.run("export CWLPOLICYARN=$( aws iam list-policies --query 'Policies[?PolicyName==`CloudWatchLogsFullAccess`].{ARN:Arn}' --output text) ",shell=True,check=Tru #choosing policy
+
+    subprocess.run("aws iam attach-user-policy --user-name CWLExportUser --policy-arn $S3POLICYARN ",shell=True,check=True) #attaching the policy to role
+
+    subprocess.run("aws iam attach-user-policy --user-name CWLExportUser --policy-arn $CWLPOLICYARN ",shell=True,check=True)
+    subprocess.run("ws iam list-attached-user-policies --user-name CWLExportUser
+ ",shell=True,check=True)
+
+
+    
+#Below we write a policy to the S3 bucket I created
+    
+    
+     {
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Action": "s3:GetBucketAcl",
+            "Effect": "Allow",
+            "Resource": "arn:aws:s3:::isuribucket",
+            "Principal": { "Service": "logs.ap-south-1.amazonaws.com" }
+        },
+        {
+            "Action": "s3:PutObject" ,
+            "Effect": "Allow",
+            "Resource": "arn:aws:s3:::isuribucket/*",
+            "Condition": { "StringEquals": { "s3:x-amz-acl": "bucket-owner-full-control" } },
+            "Principal": { "Service": "logs.ap-south-1.amazonaws.com" }
+        }
+    ]
+}
+
+
+subprocess.run("aws s3api put-bucket-policy --bucket isuribucket --policy file://policy.json ",shell=True,check=True) #put the policy(permission) into the S# bucket  
+
+
+
+
+
+----------------------------------------
+#How to create a log group using cli
+----------------------------------------
+
+
+#First download Install the cloudwatch agent
+
+wget https://s3.amazonaws.com/amazoncloudwatch-agent/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb
+
+#downloading the agent
+
+sudo dpkg -i -E ./amazon-cloudwatch-agent.deb
+
+#Create the Amazon CloudWatch configuration file by running the Amazon CloudWatch configuration wizard
+sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-config-wizard
+
+
+
+#answer to the questions asked by wizard
+#The resulting configuration file will be installed locally  as /opt/aws/amazon-cloudwatch-agent/bin/config.json
+
+#Create an IAM role for the CloudWatch Agent with the policy CloudWatchAgentServerPolicy
+#and create an access key
+#Create an AWS credentials file with the above AWS access key ID and corresponding secret access key at /home/bitnami/.aws/credentials
+#Write AWS-ACCESS-KEY-ID and AWS-SECRET-ACCESS-KEY obtained from an initial step, there.
+
+sudo vi /opt/aws/amazon-cloudwatch-agent/etc/common-config.toml #Edit the common configuration file for the Amazon CloudWatch agent and specify the path to the credentials file created in the previous step
+sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -c file:/opt/aws/amazon-cloudwatch-agent/bin/config.json -s#start the CloudWatch agaent
+
+#Attach the above created role to the EC2 instance in the console
+
+
+sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-config-wizard  #Create the CloudWatch Agent configuration file
+
+#When the wizard asks for additional log files to monitor, choose 1. Yes. and specify the following values:
+
+Log file path: /var/log/www/error/* #creating a new log group here
+Log group name: my-log-group_error
+Log stream name: [{instance_id}]
+#again choose 1
+
+Log file path: /var/log/www/access/*
+Log group name: my-log-group_access
+Log stream name: [{instance_id}]
+
+#now choose 2 to finish adding
+
+
+
+#Configure Apache HTTP Server
+
+
+sudo nano /etc/httpd/conf/httpd.conf #open the apache configuration file 
+
+#do the following changes
+
+ErrorLog "/var/log/www/error/error_log"
+ErrorLogFormat "{\"time\":\"%{%usec_frac}t\", \"function\" : \"[%-m:%l]\",\"process\" : \"[pid%P]\" ,\"message\" : \"%M\"}"
+
+
+CustomLog "/var/log/www/access/access_log" cloudwatch
+
+
+save and exit
+
+
+#as our new configuration file includes following folders 
+/var/log/www/error
+/var/log/www/access
+
+
+
+
+
+
+we have to create them
+
+sudo mkdir /var/log/www/ #create the required folders
+
+
+sudo mkdir /var/log/www/error/var/log/www/access
+ 
+
+
+
+
+sudo systemctl restart httpd #Restart the Apache HTTP Server service to use the new configuration:
+sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+-a fetch-config -m ec2 -c file:/opt/aws/amazon-cloudwatch-agent/bin/config.json -s    
+   #Tell the CloudWatch Agent to use the wizard-generated configuration file
+
+
+sudo systemctl start amazon-cloudwatch-agent.service#start the cloudwatch agent
+sudo systemctl enable amazon-cloudwatch-agent.service cloudwatch agent to start at boot time
+
+     sudo systemctl enable httpd "#To appache server to start at the boot time
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
